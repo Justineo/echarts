@@ -28,6 +28,7 @@ import {
     Sector,
     updateProps,
     initProps,
+    removeElement,
     removeElementWithFadeOut,
     traverseElements
 } from '../../util/graphic';
@@ -66,11 +67,11 @@ import {LayoutRect} from '../../util/layout';
 import {EventCallback} from 'zrender/src/core/Eventful';
 import { warn } from '../../util/log';
 import {createSectorCalculateTextPosition, SectorTextPosition, setSectorTextRotation} from '../../label/sectorLabel';
-import { saveOldStyle } from '../../animation/basicTransition';
+import { getAnimationConfig, saveOldStyle } from '../../animation/basicTransition';
 import Element from 'zrender/src/Element';
 import { getSectorCornerRadius } from '../helper/sectorHelper';
 import { getIncrementalId } from '../../util/model';
-import { SERIES_TYPE_BAR } from '../../layout/barCommon';
+import { getStartValue, SERIES_TYPE_BAR } from '../../layout/barCommon';
 
 const mathMax = Math.max;
 const mathMin = Math.min;
@@ -100,6 +101,7 @@ class BarView extends ChartView {
     readonly type = SERIES_TYPE_BAR;
 
     private _data: SeriesData;
+    private _leavingData: SeriesData;
 
     private _isLargeDraw: boolean;
 
@@ -120,8 +122,6 @@ class BarView extends ChartView {
     }
 
     render(seriesModel: BarSeriesModel, ecModel: GlobalModel, api: ExtensionAPI, payload: Payload) {
-        this._model = seriesModel;
-
         this._removeOnRenderedListener(api);
 
         this._updateDrawMode(seriesModel);
@@ -141,6 +141,7 @@ class BarView extends ChartView {
         else if (__DEV__) {
             warn('Only cartesian2d and polar supported for bar.');
         }
+        this._model = seriesModel;
     }
 
     incrementalPrepareRender(seriesModel: BarSeriesModel): void {
@@ -178,9 +179,13 @@ class BarView extends ChartView {
     ): void {
         const group = this.group;
         const data = seriesModel.getData();
-        const oldData = this._data;
+        const oldData = this._data || this._leavingData;
+        this._leavingData = null;
 
         const coord = seriesModel.coordinateSystem;
+        // A filtered series loses _data, but its view has already rendered.
+        const isStackUpdate = coord.type === 'cartesian2d' && !!seriesModel.get('stack')
+            && !!(this._model || payload);
         const baseAxis = coord.getBaseAxis();
         let isHorizontalOrRadial: boolean;
 
@@ -269,7 +274,7 @@ class BarView extends ChartView {
                     isHorizontalOrRadial,
                     animationModel,
                     baseAxis.model,
-                    false,
+                    isStackUpdate,
                     roundCap
                 );
                 if (realtimeSortCfg) {
@@ -304,7 +309,7 @@ class BarView extends ChartView {
                     );
                 }
                 else {
-                    initProps(el, {shape: layout} as any, seriesModel, dataIndex);
+                    (isStackUpdate ? updateProps : initProps)(el, {shape: layout} as any, seriesModel, dataIndex);
                 }
 
                 data.setItemGraphicEl(dataIndex, el);
@@ -636,8 +641,67 @@ class BarView extends ChartView {
     }
 
     remove(ecModel: GlobalModel, api: ExtensionAPI) {
-        this._clear(this._model);
+        const model = this._model;
+        if (model && ecModel.isSeriesFiltered(model) && model.get('stack')
+            && model.coordinateSystem && isCoordinateSystemType<Cartesian2D>(model.coordinateSystem, 'cartesian2d')
+            && !this._isLargeDraw
+            && model.isAnimationEnabled()
+        ) {
+            this._removeStackedBars(model);
+        }
+        else {
+            this._clear(model);
+        }
         this._removeOnRenderedListener(api);
+    }
+
+    private _removeStackedBars(model: BarSeriesModel): void {
+        // Keep the shrinking bars available for a legend selection that interrupts
+        // their exit. Fading them independently would expose a gap before the rest
+        // of the stack has finished moving into the vacated space.
+        const data = this._data;
+        if (!data) {
+            return;
+        }
+        this._data = null;
+        this._leavingData = data;
+        this._removeBackground();
+        this._backgroundEls = [];
+        this._isFirstFrame = true;
+
+        const coord = model.coordinateSystem as Cartesian2D;
+        const baseAxis = coord.getBaseAxis();
+        const horizontal = baseAxis.isHorizontal();
+        const position = horizontal ? 'y' : 'x';
+        const size = horizontal ? 'height' : 'width';
+        const baseline = getStackBaseline(model);
+        let remaining = 0;
+        data.eachItemGraphicEl(() => {
+            remaining++;
+        });
+        data.eachItemGraphicEl((el: Rect, index: number) => {
+            const previous = getStackedOnShape(data, index, false);
+            const shape = extend({}, el.shape);
+            shape[position] = previous ? previous[position] + previous[size] : baseline;
+            shape[size] = 0;
+            el.removeTextContent();
+            el.removeTextGuideLine();
+            const animation = getAnimationConfig('update', model, index);
+            removeElement(el, {shape}, model, {
+                dataIndex: index,
+                removeOpt: animation,
+                cb: () => {
+                    this.group.remove(el);
+                    data.setItemGraphicEl(index, null);
+                    if (--remaining === 0 && this._leavingData === data) {
+                        this._leavingData = null;
+                    }
+                }
+            });
+        });
+        if (!remaining) {
+            this._leavingData = null;
+        }
     }
 
     dispose(ecModel: GlobalModel, api: ExtensionAPI) {
@@ -652,6 +716,7 @@ class BarView extends ChartView {
     }
 
     private _clear(model?: SeriesModel): void {
+        this._leavingData = null;
         const group = this.group;
         const data = this._data;
         if (model && model.isAnimationEnabled() && data && !this._isLargeDraw) {
@@ -785,6 +850,13 @@ const elementCreator: {
             const rectShape = rect.shape;
             const animateProperty = isHorizontal ? 'height' : 'width' as 'width' | 'height';
             rectShape[animateProperty] = 0;
+            if (seriesModel.get('stack')) {
+                const position = isHorizontal ? 'y' : 'x';
+                const previous = isUpdate && getStackedOnShape(data, newIndex, true);
+                rectShape[position] = previous
+                    ? previous[position] + previous[animateProperty]
+                    : getStackBaseline(seriesModel);
+            }
         }
         return rect;
     },
@@ -822,6 +894,46 @@ const elementCreator: {
         return sector;
     }
 };
+
+// Share the layout's resolved start value, including log axes and explicit startValue.
+function getStackBaseline(seriesModel: BarSeriesModel): number {
+    const coord = seriesModel.coordinateSystem as Cartesian2D;
+    const valueAxis = coord.getOtherAxis(coord.getBaseAxis());
+    const start = valueAxis.toGlobalCoord(valueAxis.dataToCoord(getStartValue(valueAxis)));
+    const extent = valueAxis.getGlobalExtent(true);
+    return seriesModel.get('clip', true) ? mathMax(extent[0], mathMin(start, extent[1])) : start;
+}
+
+// Find the actual predecessor, which may skip missing values or the opposite sign.
+function getStackedOnShape(data: SeriesData, dataIndex: number, firstFrame: boolean): RectShape {
+    const stackedOver = data.get(data.getCalculationInfo('stackedOverDimension'), dataIndex);
+    let stackedOnSeries = data.getCalculationInfo('stackedOnSeries');
+    while (stackedOnSeries) {
+        const stackedData = (stackedOnSeries as SeriesModel).getData();
+        const rawIndex = data.getCalculationInfo('isStackedByIndex')
+            ? data.getRawIndex(dataIndex)
+            : stackedData.rawIndexOf(stackedData.getCalculationInfo('stackedByDimension'),
+                data.get(data.getCalculationInfo('stackedByDimension'), dataIndex) as number);
+        const index = stackedData.indexOfRawIndex(rawIndex);
+        if (index >= 0
+            && stackedData.get(stackedData.getCalculationInfo('stackResultDimension'), index) === stackedOver
+        ) {
+            const el = stackedData.getItemGraphicEl(index) as Rect;
+            if (el && el.type === 'rect') {
+                const shape = extend({}, el.shape);
+                // updateProps sets the shape to its destination before the first frame.
+                // Read the requested transition endpoint rather than an intermediate shape.
+                each(el.animators, animator => {
+                    if (animator.targetName === 'shape') {
+                        animator.saveTo(shape, null, firstFrame);
+                    }
+                });
+                return shape;
+            }
+        }
+        stackedOnSeries = stackedData.getCalculationInfo('stackedOnSeries');
+    }
+}
 
 function shouldRealtimeSort(
     seriesModel: BarSeriesModel,
