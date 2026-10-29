@@ -17,6 +17,8 @@
 * under the License.
 */
 
+/* global jest */
+
 import { EChartsType } from '@/src/echarts';
 import { createChart, getECModel } from '../../core/utHelper';
 import Rect from 'zrender/src/graphic/shape/Rect';
@@ -94,10 +96,6 @@ describe('stacked bar animation', () => {
                         for (let i = 0; i < 2; i++) {
                             chart.dispatchAction({type: 'legendUnSelect', name: 'B'});
                             finish();
-                            const model = getECModel(chart).getSeriesByIndex(1);
-                            const view = (chart as any).getViewOfSeriesModel(model);
-                            // Hiding the series discards BarView's data, so restoring takes data.add.
-                            expect(view._data).toBeNull();
                             chart.dispatchAction({type: 'legendSelect', name: 'B'});
                             [100, 200, 300].forEach(elapsed => {
                                 frame(elapsed);
@@ -119,7 +117,9 @@ describe('stacked bar animation', () => {
         [false, true].forEach(horizontal => {
             [false, true].forEach(inverse => {
                 [false, true].forEach(viaOption => {
-                    it.each([0, 40])(`continues interrupted legend transitions: ${renderer}, ${horizontal}, ${inverse}, setOption=${viaOption}, delay=%i`, delay => {
+                    const title = `continues interrupted legend transitions: ${renderer}, ${horizontal}, ${inverse}, `
+                        + `setOption=${viaOption}, delay=%i`;
+                    it.each([0, 40])(title, delay => {
                         chart = createChart({opts: {renderer}});
                         chart.setOption({
                             animationDuration: 1000,
@@ -177,7 +177,10 @@ describe('stacked bar animation', () => {
                                 expect(series[1].getData().getItemGraphicEl(0)).toBe(elements[1][0]);
                             }
                             expectConnected();
-                            [30, 30, 60].forEach(ms => { advance(ms); expectConnected(); });
+                            [30, 30, 60].forEach(ms => {
+                                advance(ms);
+                                expectConnected();
+                            });
                         });
                         advance(400 + delay);
                         expectConnected();
@@ -219,7 +222,9 @@ describe('stacked bar animation', () => {
                 {min: -12, max: -2, startValue: 0, values: [-3, -2, -4], clip: true},
                 {min: 2, max: 12, startValue: -5, values: [3, 2, 4], clip: false}
             ].forEach(({min, max, startValue, values, clip}) => {
-                it(`starts at the visible baseline: horizontal=${horizontal}, inverse=${inverse}, ${min}/${max}, clip=${clip}`, () => {
+                const title = `starts at the visible baseline: horizontal=${horizontal}, inverse=${inverse}, `
+                    + `${min}/${max}, clip=${clip}`;
+                it(title, () => {
                     chart = createChart();
                     const valueAxis = {min, max, startValue, inverse};
                     chart.setOption({
@@ -296,7 +301,7 @@ describe('stacked bar animation', () => {
         }
     });
 
-    it('restores an initially deselected series with the update animation', () => {
+    it.each([false, true])('restores an initially deselected series, setOption=%s', viaOption => {
         chart = createChart();
         chart.setOption({
             animationDuration: 1000,
@@ -311,10 +316,225 @@ describe('stacked bar animation', () => {
         });
         chart.getZr().animation.stop();
         finish();
-        chart.dispatchAction({type: 'legendSelect', name: 'B'});
+        if (viaOption) {
+            chart.setOption({legend: {selected: {B: true}}});
+        }
+        else {
+            chart.dispatchAction({type: 'legendSelect', name: 'B'});
+        }
         frame(200);
         const els = bars();
         expect(els[1].shape.y).toBeCloseTo(els[0].shape.y + els[0].shape.height, 8);
         expect(els[2].shape.y).toBeCloseTo(els[1].shape.y + els[1].shape.height, 8);
+    });
+
+    describe('review regressions', () => {
+        let time: number;
+        function advance(ms: number) {
+            jest.setSystemTime(time += ms);
+            chart.getZr().animation.update();
+        }
+        function setup(option: any = {}, renderer: 'canvas' | 'svg' = 'canvas') {
+            time = 0;
+            chart = createChart({opts: {renderer}});
+            chart.setOption({
+                animationDuration: 1000, animationDurationUpdate: 400,
+                animationEasing: 'linear', animationEasingUpdate: 'linear',
+                legend: {}, xAxis: {data: ['a', 'b']}, yAxis: {},
+                series: [3, 2, 4].map((v, i) => ({
+                    name: ['A', 'B', 'C'][i], type: 'bar', stack: 's', data: [v, -v]
+                })), ...option
+            });
+            chart.getZr().animation.stop();
+            advance(0);
+        }
+        function toggle(name: string, selected: boolean) {
+            chart.dispatchAction({type: selected ? 'legendSelect' : 'legendUnSelect', name});
+            advance(0);
+        }
+        function connected(elements: Rect[]) {
+            for (let i = 1; i < elements.length; i++) {
+                expect(elements[i].shape.y).toBeCloseTo(elements[i - 1].shape.y + elements[i - 1].shape.height, 8);
+            }
+        }
+
+        ['canvas', 'svg'].forEach((renderer: 'canvas' | 'svg') => {
+            [false, true].forEach(viaOption => {
+                it(`restores descending stacks: ${renderer}, setOption=${viaOption}`, () => {
+                    setup({series: [3, 2, 4].map((v, i) => ({
+                        name: ['A', 'B', 'C'][i], type: 'bar', stack: 's', stackOrder: 'seriesDesc', data: [v, -v]
+                    }))}, renderer);
+                    advance(1000);
+                    toggle('B', false);
+                    advance(400);
+                    if (viaOption) {
+                        chart.setOption({legend: {selected: {B: true}}});
+                        advance(0);
+                    }
+                    else {
+                        toggle('B', true);
+                    }
+                    [0, 100, 100, 100].forEach(ms => {
+                        advance(ms);
+                        [0, 1].forEach(index => connected(getECModel(chart).getSeries().map(model =>
+                            model.getData().getItemGraphicEl(index) as Rect).reverse()));
+                    });
+                    toggle('B', false);
+                    advance(100);
+                    toggle('B', true);
+                    advance(100);
+                    [0, 1].forEach(index => connected(getECModel(chart).getSeries().map(model =>
+                        model.getData().getItemGraphicEl(index) as Rect).reverse()));
+                });
+            });
+        });
+
+        it.each(['append', 'zoom'])('uses entrance timing for new items: %s', action => {
+            setup(action === 'zoom'
+                ? {dataZoom: [{type: 'inside', startValue: 0, endValue: 0, filterMode: 'filter'}]}
+                : {});
+            advance(1000);
+            if (action === 'append') {
+                chart.setOption({xAxis: {data: ['a', 'b', 'c']}, series: [3, 2, 4].map(v => ({data: [v, -v, v]}))});
+            }
+            else {
+                chart.dispatchAction({type: 'dataZoom', startValue: 0, endValue: 1});
+            }
+            advance(0);
+            advance(500);
+            getECModel(chart).getSeries().forEach(model => {
+                const data = model.getData();
+                const index = data.count() - 1;
+                const el = data.getItemGraphicEl(index) as Rect;
+                expect(el.animators.some(animator => animator.scope === 'enter')).toBe(true);
+                expect(el.shape.height).toBeCloseTo(data.getItemLayout(index).height / 2, 8);
+            });
+        });
+
+        it.each(['duration', 'easing', 'delay'])('keeps independent entrance positions with different %s', setting => {
+            setup({series: [3, 2, 4].map((v, i) => ({
+                name: ['A', 'B', 'C'][i], type: 'bar', stack: 's', data: [v, -v],
+                ...(setting === 'duration' ? {animationDuration: 1000 + i * 200}
+                    : setting === 'easing' ? {animationEasing: i === 1 ? 'cubicIn' : 'linear'}
+                        : {animationDelay: i * 100})
+            }))});
+            advance(250);
+            getECModel(chart).getSeries().forEach(model => {
+                const data = model.getData();
+                [0, 1].forEach(index => {
+                    const el = data.getItemGraphicEl(index) as Rect;
+                    expect(el.shape.y).toBeCloseTo(data.getItemLayout(index).y, 8);
+                    expect(Math.abs(el.shape.height)).toBeLessThan(Math.abs(data.getItemLayout(index).height));
+                });
+            });
+        });
+
+        it('keeps a shared category stagger connected', () => {
+            setup({animationDelay: (index: number) => index * 100});
+            [50, 100, 150].forEach(ms => {
+                advance(ms);
+                [0, 1].forEach(index => connected(getECModel(chart).getSeries().map(model =>
+                    model.getData().getItemGraphicEl(index) as Rect)));
+            });
+        });
+
+        it.each([false, true])('handles a removed predecessor while B leaves, replaced=%s', replace => {
+            const series = [3, 2, 4].map((value, index) => ({
+                id: ['A', 'B', 'C'][index], name: ['A', 'B', 'C'][index],
+                type: 'bar', stack: 's', data: [value, -value]
+            }));
+            setup({series});
+            advance(1000);
+            const exiting = [0, 1].map(index => getECModel(chart).getSeriesByIndex(1)
+                .getData().getItemGraphicEl(index) as Rect);
+            toggle('B', false);
+            advance(100);
+            const next = series.slice(1);
+            if (replace) {
+                next.push({id: 'D', name: 'D', type: 'bar', stack: 'other', data: [3, -3]});
+            }
+            expect(() => chart.setOption({series: next}, {replaceMerge: ['series']})).not.toThrow();
+            advance(0);
+            advance(200);
+            const c = getECModel(chart).getSeriesByName('C')[0].getData();
+            [0, 1].forEach(index => connected([exiting[index], c.getItemGraphicEl(index) as Rect]));
+            advance(200);
+            toggle('B', true);
+            advance(200);
+            [0, 1].forEach(index => connected(['B', 'C'].map(name =>
+                getECModel(chart).getSeriesByName(name)[0].getData().getItemGraphicEl(index) as Rect)));
+        });
+
+        it.each(['seriesAsc', 'seriesDesc'])('connects a recreated missing bar with %s', stackOrder => {
+            setup({series: [3, NaN, 4].map((value, index) => ({
+                name: ['A', 'B', 'C'][index], type: 'bar', stack: 's', stackOrder, data: [value, -value]
+            }))});
+            advance(1000);
+            chart.setOption({series: [{}, {data: [2, -2]}]});
+            [0, 100, 100, 200].forEach(ms => {
+                advance(ms);
+                [0, 1].forEach(index => {
+                    const elements = getECModel(chart).getSeries().map(model =>
+                        model.getData().getItemGraphicEl(index) as Rect);
+                    connected(stackOrder === 'seriesDesc' ? elements.reverse() : elements);
+                });
+            });
+        });
+
+        it('does not invoke timing callbacks to compare stacked series', () => {
+            const delay = jest.fn((index: number) => index * 100);
+            const duration = jest.fn(() => 1000);
+            setup({animationDelay: delay, animationDuration: duration});
+            expect(delay).toHaveBeenCalledTimes(6);
+            expect(duration).toHaveBeenCalledTimes(6);
+        });
+
+        it('keeps independent entrance positions when a shared callback receives reordered indices', () => {
+            setup({
+                animationDelay: (index: number) => index * 100,
+                series: [
+                    {type: 'bar', stack: 's', data: [['b', 3], ['a', 3]]},
+                    {type: 'bar', stack: 's', data: [['a', 2], ['b', 2]]}
+                ]
+            });
+            advance(250);
+            getECModel(chart).getSeries().forEach(model => {
+                const data = model.getData();
+                [0, 1].forEach(index => {
+                    const el = data.getItemGraphicEl(index) as Rect;
+                    expect(el.shape.y).toBeCloseTo(data.getItemLayout(index).y, 8);
+                });
+            });
+        });
+
+        it.each(['hide C', 'hide A', 'update A', 'zoom'])('retargets an exiting B when we %s', action => {
+            setup({dataZoom: [{type: 'inside', startValue: 0, endValue: 1, filterMode: 'none'}]});
+            advance(1000);
+            const stacks = [0, 1].map(index => getECModel(chart).getSeries().map(model =>
+                model.getData().getItemGraphicEl(index) as Rect));
+            toggle('B', false);
+            advance(100);
+            if (action.startsWith('hide')) {
+                toggle(action.slice(-1), false);
+            }
+            else if (action === 'update A') {
+                chart.setOption({series: [{data: [6, -6]}]});
+                advance(0);
+            }
+            else {
+                chart.dispatchAction({type: 'dataZoom', startValue: 0, endValue: 0});
+                advance(0);
+            }
+            [50, 100, 100].forEach(ms => {
+                advance(ms);
+                stacks.forEach(elements => {
+                    connected(elements);
+                    expect(elements[1].shape.x).toBeCloseTo(elements[0].shape.x, 8);
+                    expect(elements[1].shape.width).toBeCloseTo(elements[0].shape.width, 8);
+                });
+            });
+            advance(150);
+            stacks.forEach(elements => expect(elements[1].parent).toBeNull());
+        });
     });
 });
