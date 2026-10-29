@@ -227,11 +227,20 @@ class BarView extends ChartView {
         const isInitSort = payload && payload.isInitSort;
         const isChangeOrder = payload && payload.type === 'changeAxisOrder';
 
-        // Independent entrance timings retain the original in-place entrance.
-        const sameEnterTiming = isStacked && !isStackUpdate && hasSameStackTiming(seriesModel, ecModel);
+        // Compare entrance timings only when a new bar needs them, once per render.
+        let sameEnterTiming: boolean;
         const getStackStart = (dataIndex: number, isUpdate: boolean) => {
-            if (!isStacked || !isUpdate && !sameEnterTiming) {
+            if (!isStacked || !animationModel) {
                 return;
+            }
+            if (!isUpdate) {
+                if (sameEnterTiming == null) {
+                    sameEnterTiming = hasSameStackTiming(seriesModel, ecModel);
+                }
+                // Independent entrance timings retain the original in-place entrance.
+                if (!sameEnterTiming) {
+                    return;
+                }
             }
             const previous = isUpdate && this._getStackedOnShape(data, dataIndex, api, true);
             return previous

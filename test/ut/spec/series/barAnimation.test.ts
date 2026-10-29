@@ -489,6 +489,36 @@ describe('stacked bar animation', () => {
             expect(duration).toHaveBeenCalledTimes(6);
         });
 
+        it.each(['refresh', 'zoom', 'animation disabled'])('skips unused entrance timing checks: %s', action => {
+            setup({
+                animationDelay: (index: number) => index * 100,
+                dataZoom: [{type: 'inside', filterMode: 'none'}]
+            });
+            advance(1000);
+            const spies = getECModel(chart).getSeries().map(model => jest.spyOn(model, 'getShallow'));
+            try {
+                if (action === 'zoom') {
+                    chart.dispatchAction({type: 'dataZoom', startValue: 0, endValue: 0});
+                }
+                else if (action === 'animation disabled') {
+                    chart.setOption({
+                        animation: false,
+                        xAxis: {data: ['a', 'b', 'c']},
+                        series: [3, 2, 4].map(value => ({data: [value, -value, value]}))
+                    });
+                }
+                else {
+                    chart.setOption({series: [4, 1, 2].map(value => ({data: [value, -value]}))});
+                }
+                spies.forEach(spy => {
+                    expect(spy.mock.calls.filter(args => args[0] === 'animationDuration')).toHaveLength(0);
+                });
+            }
+            finally {
+                spies.forEach(spy => spy.mockRestore());
+            }
+        });
+
         it('keeps independent entrance positions when a shared callback receives reordered indices', () => {
             setup({
                 animationDelay: (index: number) => index * 100,
